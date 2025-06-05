@@ -1328,7 +1328,7 @@ impl Server {
         // Instead, we ROLLBACK that transaction before putting the connection back in the pool
         if self.in_transaction() {
             warn!(target: "pgcat::server::cleanup", "Server returned while still in transaction, rolling back transaction");
-            self.query("ROLLBACK").await?;
+            self.query("ROLLBACK;").await?;
         }
 
         // Client disconnected but it performed session-altering operations such as
