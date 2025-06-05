@@ -1336,25 +1336,14 @@ impl Server {
         // to avoid leaking state between clients. For performance reasons we only
         // send `RESET ALL` if we think the session is altered instead of just sending
         // it before each checkin.
-        if self.cleanup_state.needs_cleanup() && self.cleanup_connections {
-            info!(target: "pgcat::server::cleanup", "Server returned with session state altered, discarding state ({}) for application {}", self.cleanup_state, self.application_name);
-            let mut reset_string = String::from("RESET ROLE;");
-
-            if self.cleanup_state.needs_cleanup_set {
-                reset_string.push_str("RESET ALL;");
-            };
-
-            if self.cleanup_state.needs_cleanup_prepare {
-                reset_string.push_str("DEALLOCATE ALL;");
-                // Since we deallocated all prepared statements, we need to clear the cache
-                if let Some(cache) = &mut self.prepared_statement_cache {
-                    cache.clear();
-                }
-            };
-
-            self.query(&reset_string).await?;
-            self.cleanup_state.reset();
-        }
+        debug!(target: "pgcat::server::cleanup", "Discarding state ({}) for application {}", self.cleanup_state, self.application_name);
+        let mut reset_string = String::from("DISCARD ALL;");
+        // Since we deallocated all prepared statements, we need to clear the cache
+        if let Some(cache) = &mut self.prepared_statement_cache {
+            cache.clear();
+        };
+        self.query(&reset_string).await?;
+        self.cleanup_state.reset();
 
         if self.in_copy_mode() {
             warn!(target: "pgcat::server::cleanup", "Server returned while still in copy-mode");
