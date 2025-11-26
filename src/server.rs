@@ -1342,6 +1342,28 @@ impl Server {
         Ok(())
     }
 
+    /// Ensure the server is ready for simple-query messages by ending any in-flight
+    /// extended-protocol pipeline (triggered when the client requested async/flush).
+    async fn ensure_ready_for_simple_query(&mut self) -> Result<(), Error> {
+        if self.is_async {
+            // Send a Sync to terminate any extended-protocol pipeline and drain until ReadyForQuery
+            let mut bytes = BytesMut::new();
+            bytes.extend_from_slice(&sync());
+            self.send(&bytes).await?;
+
+            loop {
+                self.recv(None).await?;
+                if !self.is_data_available() {
+                    break;
+                }
+            }
+
+            // Back to normal (non-async) mode
+            self.switch_async(false);
+        }
+        Ok(())
+    }
+
     /// Perform any necessary cleanup before putting the server
     /// connection back in the pool
     pub async fn checkin_cleanup(&mut self) -> Result<(), Error> {
@@ -1359,13 +1381,18 @@ impl Server {
         // to avoid leaking state between clients. For performance reasons we only
         // send `RESET ALL` if we think the session is altered instead of just sending
         // it before each checkin.
-        debug!(target: "pgcat::server::cleanup", "Discarding state ({}) for application {}", self.cleanup_state, self.application_name);
-        let mut reset_string = String::from("DISCARD ALL;");
-        // Since we deallocated all prepared statements, we need to clear the cache
-        if let Some(cache) = &mut self.prepared_statement_cache {
-            cache.clear();
-        };
-        self.query(&reset_string).await?;
+        if self.cleanup_connections || self.cleanup_state.needs_cleanup() {
+            // If the last client interaction used async/flush (pipeline-like), exit it first so
+            // that DISCARD ALL is allowed by the server.
+            self.ensure_ready_for_simple_query().await?;
+
+            debug!(target: "pgcat::server::cleanup", "Discarding state ({}) for application {}", self.cleanup_state, self.application_name);
+            // Since we deallocated all prepared statements, we need to clear the cache
+            if let Some(cache) = &mut self.prepared_statement_cache {
+                cache.clear();
+            };
+            self.query("DISCARD ALL;").await?;
+        }
         self.cleanup_state.reset();
 
         if self.in_copy_mode() {

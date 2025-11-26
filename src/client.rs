@@ -327,6 +327,10 @@ where
         Ok(len) => len,
         Err(_) => return Err(Error::ClientBadStartup),
     };
+    if len < 8 {
+        // 4 bytes length + 4 bytes code is the minimum
+        return Err(Error::ClientBadStartup);
+    }
 
     // Get the rest of the message.
     let mut startup = vec![0u8; len as usize - 4];
@@ -1525,7 +1529,7 @@ where
                         let mut should_send_to_server = true;
 
                         // If we have just a sync message left (maybe after omitting sending some messages to the server) no need to send it to the server
-                        if *self.buffer.first().unwrap() == b'S' {
+                        if matches!(self.buffer.first(), Some(b'S')) {
                             should_send_to_server = false;
                             // queue up a ready for query message to send to the client, respecting the transaction state of the server
                             self.response_message_queue_buffer
@@ -1667,8 +1671,8 @@ where
 
                 Err(Error::ClientError(format!(
                     "Invalid pool name {{ username: {}, pool_name: {}, application_name: {} }}",
-                    self.pool_name,
                     self.username,
+                    self.pool_name,
                     self.server_parameters.get_application_name()
                 )))
             }
