@@ -11,3 +11,5 @@ dev/.bash_history
 dev/cache
 !dev/cache/.keepme
 .venv
+**/__pycache__
+.bundle

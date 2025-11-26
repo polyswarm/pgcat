@@ -152,6 +152,14 @@ pub struct PoolSettings {
     /// Random or LeastOutstandingConnections.
     pub load_balancing_mode: LoadBalancingMode,
 
+    /// Maximum number of checkout failures a client is allowed before it
+    /// gets disconnected. This is needed to prevent persistent client/server
+    /// imbalance in high availability setups where multiple PgCat instances are placed
+    /// behind a single load balancer. If for any reason a client lands on a PgCat instance that has
+    /// a large number of connected clients, it might get stuck in perpetual checkout failure loop especially
+    /// in session mode
+    pub checkout_failure_limit: Option<u64>,
+
     // Number of shards.
     pub shards: usize,
 
@@ -173,6 +181,18 @@ pub struct PoolSettings {
 
     // Read from the primary as well or not.
     pub primary_reads_enabled: bool,
+
+    // Automatic primary/replica selection based on recent activity.
+    pub db_activity_based_routing: bool,
+
+    // DB activity init delay
+    pub db_activity_init_delay: u64,
+
+    // DB activity TTL
+    pub db_activity_ttl: u64,
+
+    // Table mutation cache TTL
+    pub table_mutation_cache_ms_ttl: u64,
 
     // Sharding function.
     pub sharding_function: ShardingFunction,
@@ -215,6 +235,7 @@ impl Default for PoolSettings {
         PoolSettings {
             pool_mode: PoolMode::Transaction,
             load_balancing_mode: LoadBalancingMode::Random,
+            checkout_failure_limit: None,
             shards: 1,
             user: User::default(),
             db: String::default(),
@@ -223,6 +244,10 @@ impl Default for PoolSettings {
             query_parser_max_length: None,
             query_parser_read_write_splitting: false,
             primary_reads_enabled: true,
+            db_activity_based_routing: false,
+            db_activity_init_delay: 100,
+            db_activity_ttl: 15 * 60,
+            table_mutation_cache_ms_ttl: 50,
             sharding_function: ShardingFunction::PgBigintHash,
             automatic_sharding_key: None,
             healthcheck_delay: General::default_healthcheck_delay(),
@@ -521,6 +546,7 @@ impl ConnectionPool {
                             None => pool_config.pool_mode,
                         },
                         load_balancing_mode: pool_config.load_balancing_mode,
+                        checkout_failure_limit: pool_config.checkout_failure_limit,
                         // shards: pool_config.shards.clone(),
                         shards: shard_ids.len(),
                         user: user.clone(),
@@ -537,6 +563,10 @@ impl ConnectionPool {
                             .query_parser_read_write_splitting,
                         primary_reads_enabled: pool_config.primary_reads_enabled,
                         sharding_function: pool_config.sharding_function,
+                        db_activity_based_routing: pool_config.db_activity_based_routing,
+                        db_activity_init_delay: pool_config.db_activity_init_delay,
+                        db_activity_ttl: pool_config.db_activity_ttl,
+                        table_mutation_cache_ms_ttl: pool_config.table_mutation_cache_ms_ttl,
                         automatic_sharding_key: pool_config.automatic_sharding_key.clone(),
                         healthcheck_delay: config.general.healthcheck_delay,
                         healthcheck_timeout: config.general.healthcheck_timeout,
@@ -813,7 +843,7 @@ impl ConnectionPool {
             }
         }
 
-        client_stats.checkout_success();
+        client_stats.checkout_error();
 
         Err(Error::AllServersDown)
     }

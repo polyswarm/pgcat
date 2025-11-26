@@ -38,12 +38,12 @@ pub enum Role {
     Mirror,
 }
 
-impl ToString for Role {
-    fn to_string(&self) -> String {
-        match *self {
-            Role::Primary => "primary".to_string(),
-            Role::Replica => "replica".to_string(),
-            Role::Mirror => "mirror".to_string(),
+impl std::fmt::Display for Role {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Role::Primary => write!(f, "primary"),
+            Role::Replica => write!(f, "replica"),
+            Role::Mirror => write!(f, "mirror"),
         }
     }
 }
@@ -208,6 +208,9 @@ impl Address {
 pub struct User {
     pub username: String,
     pub password: Option<String>,
+
+    #[serde(default = "User::default_auth_type")]
+    pub auth_type: AuthType,
     pub server_username: Option<String>,
     pub server_password: Option<String>,
     pub pool_size: u32,
@@ -225,6 +228,7 @@ impl Default for User {
         User {
             username: String::from("postgres"),
             password: None,
+            auth_type: AuthType::MD5,
             server_username: None,
             server_password: None,
             pool_size: 15,
@@ -239,6 +243,10 @@ impl Default for User {
 }
 
 impl User {
+    pub fn default_auth_type() -> AuthType {
+        AuthType::MD5
+    }
+
     fn validate(&self) -> Result<(), Error> {
         if let Some(min_pool_size) = self.min_pool_size {
             if min_pool_size > self.pool_size {
@@ -334,6 +342,9 @@ pub struct General {
     pub admin_username: String,
     pub admin_password: String,
 
+    #[serde(default = "General::default_admin_auth_type")]
+    pub admin_auth_type: AuthType,
+
     #[serde(default = "General::default_validate_config")]
     pub validate_config: bool,
 
@@ -346,6 +357,10 @@ pub struct General {
 impl General {
     pub fn default_host() -> String {
         "0.0.0.0".into()
+    }
+
+    pub fn default_admin_auth_type() -> AuthType {
+        AuthType::MD5
     }
 
     pub fn default_port() -> u16 {
@@ -456,6 +471,7 @@ impl Default for General {
             verify_server_certificate: false,
             admin_username: String::from("admin"),
             admin_password: String::from("admin"),
+            admin_auth_type: AuthType::MD5,
             validate_config: true,
             auth_query: None,
             auth_query_user: None,
@@ -476,11 +492,20 @@ pub enum PoolMode {
     Session,
 }
 
-impl ToString for PoolMode {
-    fn to_string(&self) -> String {
-        match *self {
-            PoolMode::Transaction => "transaction".to_string(),
-            PoolMode::Session => "session".to_string(),
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Copy, Hash)]
+pub enum AuthType {
+    #[serde(alias = "trust", alias = "Trust")]
+    Trust,
+
+    #[serde(alias = "md5", alias = "MD5")]
+    MD5,
+}
+
+impl std::fmt::Display for PoolMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PoolMode::Transaction => write!(f, "transaction"),
+            PoolMode::Session => write!(f, "session"),
         }
     }
 }
@@ -493,12 +518,13 @@ pub enum LoadBalancingMode {
     #[serde(alias = "loc", alias = "LOC", alias = "least_outstanding_connections")]
     LeastOutstandingConnections,
 }
-impl ToString for LoadBalancingMode {
-    fn to_string(&self) -> String {
-        match *self {
-            LoadBalancingMode::Random => "random".to_string(),
+
+impl std::fmt::Display for LoadBalancingMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LoadBalancingMode::Random => write!(f, "random"),
             LoadBalancingMode::LeastOutstandingConnections => {
-                "least_outstanding_connections".to_string()
+                write!(f, "least_outstanding_connections")
             }
         }
     }
@@ -532,6 +558,14 @@ pub struct Pool {
     /// Close idle connections that have been opened for longer than this.
     pub idle_timeout: Option<u64>,
 
+    /// Maximum number of checkout failures a client is allowed before it
+    /// gets disconnected. This is needed to prevent persistent client/server
+    /// imbalance in high availability setups where multiple PgCat instances are placed
+    /// behind a single load balancer. If for any reason a client lands on a PgCat instance that has
+    /// a large number of connected clients, it might get stuck in perpetual checkout failure loop especially
+    /// in session mode
+    pub checkout_failure_limit: Option<u64>,
+
     /// Close server connections that have been opened for longer than this.
     /// Only applied to idle connections. If the connection is actively used for
     /// longer than this period, the pool will not interrupt it.
@@ -562,6 +596,19 @@ pub struct Pool {
 
     #[serde(default = "Pool::default_prepared_statements_cache_size")]
     pub prepared_statements_cache_size: usize,
+
+    // Support for query routing based on database activity
+    #[serde(default = "Pool::default_db_activity_based_routing")]
+    pub db_activity_based_routing: bool,
+
+    #[serde(default = "Pool::default_db_activity_init_delay")]
+    pub db_activity_init_delay: u64,
+
+    #[serde(default = "Pool::default_db_activity_ttl")]
+    pub db_activity_ttl: u64,
+
+    #[serde(default = "Pool::default_table_mutation_cache_ms_ttl")]
+    pub table_mutation_cache_ms_ttl: u64,
 
     pub plugins: Option<Plugins>,
     pub shards: BTreeMap<String, Shard>,
@@ -614,6 +661,25 @@ impl Pool {
 
     pub fn default_prepared_statements_cache_size() -> usize {
         0
+    }
+
+    pub fn default_db_activity_based_routing() -> bool {
+        false
+    }
+
+    pub fn default_db_activity_init_delay() -> u64 {
+        // 100 milliseconds
+        100
+    }
+
+    pub fn default_db_activity_ttl() -> u64 {
+        // 15 minutes
+        15 * 60
+    }
+
+    pub fn default_table_mutation_cache_ms_ttl() -> u64 {
+        // 50 milliseconds
+        50
     }
 
     pub fn validate(&mut self) -> Result<(), Error> {
@@ -698,6 +764,23 @@ impl Pool {
             user.validate()?;
         }
 
+        if self.db_activity_based_routing {
+            if self.db_activity_init_delay == 0 {
+                error!("db_activity_init_delay must be greater than 0");
+                return Err(Error::BadConfig);
+            }
+
+            if self.table_mutation_cache_ms_ttl == 0 {
+                error!("table_mutation_cache_ms_ttl must be greater than 0");
+                return Err(Error::BadConfig);
+            }
+
+            if self.db_activity_ttl == 0 {
+                error!("db_activity_ttl must be greater than 0");
+                return Err(Error::BadConfig);
+            }
+        }
+
         Ok(())
     }
 }
@@ -707,6 +790,7 @@ impl Default for Pool {
         Pool {
             pool_mode: Self::default_pool_mode(),
             load_balancing_mode: Self::default_load_balancing_mode(),
+            checkout_failure_limit: None,
             default_role: String::from("any"),
             query_parser_enabled: false,
             query_parser_max_length: None,
@@ -727,6 +811,10 @@ impl Default for Pool {
             cleanup_server_connections: true,
             log_client_parameter_status_changes: false,
             prepared_statements_cache_size: Self::default_prepared_statements_cache_size(),
+            db_activity_based_routing: Self::default_db_activity_based_routing(),
+            db_activity_init_delay: Self::default_db_activity_init_delay(),
+            db_activity_ttl: Self::default_db_activity_ttl(),
+            table_mutation_cache_ms_ttl: Self::default_table_mutation_cache_ms_ttl(),
             plugins: None,
             shards: BTreeMap::from([(String::from("1"), Shard::default())]),
             users: BTreeMap::default(),
@@ -999,15 +1087,17 @@ impl Config {
     pub fn fill_up_auth_query_config(&mut self) {
         for (_name, pool) in self.pools.iter_mut() {
             if pool.auth_query.is_none() {
-                pool.auth_query = self.general.auth_query.clone();
+                pool.auth_query.clone_from(&self.general.auth_query);
             }
 
             if pool.auth_query_user.is_none() {
-                pool.auth_query_user = self.general.auth_query_user.clone();
+                pool.auth_query_user
+                    .clone_from(&self.general.auth_query_user);
             }
 
             if pool.auth_query_password.is_none() {
-                pool.auth_query_password = self.general.auth_query_password.clone();
+                pool.auth_query_password
+                    .clone_from(&self.general.auth_query_password);
             }
         }
     }
@@ -1155,7 +1245,7 @@ impl Config {
             "Default max server lifetime: {}ms",
             self.general.server_lifetime
         );
-        info!("Sever round robin: {}", self.general.server_round_robin);
+        info!("Server round robin: {}", self.general.server_round_robin);
         match self.general.tls_certificate.clone() {
             Some(tls_certificate) => {
                 info!("TLS certificate: {}", tls_certificate);
@@ -1217,6 +1307,17 @@ impl Config {
                 None => self.general.idle_timeout,
             };
             info!("[pool: {}] Idle timeout: {}ms", pool_name, idle_timeout);
+            match pool_config.checkout_failure_limit {
+                Some(checkout_failure_limit) => {
+                    info!(
+                        "[pool: {}] Checkout failure limit: {}",
+                        pool_name, checkout_failure_limit
+                    );
+                }
+                None => {
+                    info!("[pool: {}] Checkout failure limit: not set", pool_name);
+                }
+            };
             info!(
                 "[pool: {}] Sharding function: {}",
                 pool_name,
@@ -1260,6 +1361,22 @@ impl Config {
             info!(
                 "[pool: {}] Cleanup server connections: {}",
                 pool_name, pool_config.cleanup_server_connections
+            );
+            info!(
+                "[pool: {}] DB activity based routing: {}",
+                pool_name, pool_config.db_activity_based_routing
+            );
+            info!(
+                "[pool: {}] DB activity init delay: {}",
+                pool_name, pool_config.db_activity_init_delay
+            );
+            info!(
+                "[pool: {}] DB activity TTL: {}",
+                pool_name, pool_config.db_activity_ttl
+            );
+            info!(
+                "[pool: {}] Table mutation cache TTL: {}",
+                pool_name, pool_config.table_mutation_cache_ms_ttl
             );
             info!(
                 "[pool: {}] Log client parameter status changes: {}",

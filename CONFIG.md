@@ -36,10 +36,11 @@ Port at which prometheus exporter listens on.
 ### connect_timeout
 ```
 path: general.connect_timeout
-default: 5000 # milliseconds
+default: 1000 # milliseconds
 ```
 
-How long to wait before aborting a server connection (ms).
+How long the client waits to obtain a server connection before aborting (ms).
+This is similar to PgBouncer's `query_wait_timeout`.
 
 ### idle_timeout
 ```
@@ -297,6 +298,19 @@ Load balancing mode
 `random` selects the server at random
 `loc` selects the server with the least outstanding busy connections
 
+### checkout_failure_limit
+```
+path: pools.<pool_name>.checkout_failure_limit
+default: 0 (disabled)
+```
+
+`Maximum number of checkout failures a client is allowed before it
+gets disconnected. This is needed to prevent persistent client/server
+imbalance in high availability setups where multiple PgCat instances are placed
+behind a single load balancer. If for any reason a client lands on a PgCat instance that has 
+a large number of connected clients, it might get stuck in perpetual checkout failure loop especially
+in session mode
+`
 ### default_role
 ```
 path: pools.<pool_name>.default_role
@@ -307,6 +321,45 @@ If the client doesn't specify, PgCat routes traffic to this role by default.
 `any` round-robin between primary and replicas,
 `replica` round-robin between replicas only without touching the primary,
 `primary` all queries go to the primary unless otherwise specified.
+
+### db_activity_based_routing
+```
+path: pools.<pool_name>.db_activity_based_routing
+default: false
+```
+
+If enabled, PgCat will route queries to the primary if the queried table was recently written to.
+Only relevant when `query_parser_enabled` *and* `query_parser_read_write_splitting` is enabled.
+
+##### Considerations:
+- *This feature is experimental and may not work as expected.*
+- This feature only works when the same PgCat instance is used for both reads and writes to the database.
+- This feature is not relevant when the primary is not part of the pool of databases used for load balancing of read queries.
+- If more than one PgCat instance is used for HA purposes, this feature will not work as expected. A way to still make it work is by using sticky sessions.
+
+### db_activity_based_ms_init_delay
+```
+path: pools.<pool_name>.db_activity_based_ms_init_delay
+default: 100
+```
+
+The delay in milliseconds before the first activity-based routing check is performed.
+
+### db_activity_ttl
+```
+path: pools.<pool_name>.db_activity_ttl
+default: 900
+```
+
+The time in seconds after which a DB is considered inactive when no queries/updates are performed to it.
+
+### table_mutation_cache_ms_ttl
+```
+path: pools.<pool_name>.table_mutation_cache_ms_ttl
+default: 50
+```
+
+The time in milliseconds after a write to a table that all queries to that table will be routed to the primary.
 
 ### prepared_statements_cache_size
 ```
@@ -462,9 +515,17 @@ path: pools.<pool_name>.users.<user_index>.pool_size
 default: 9
 ```
 
-Maximum number of server connections that can be established for this user
+Maximum number of server connections that can be established for this user.
 The maximum number of connection from a single Pgcat process to any database in the cluster
 is the sum of pool_size across all users.
+
+### min_pool_size
+```
+path: pools.<pool_name>.users.<user_index>.min_pool_size
+default: 0
+```
+
+Minimum number of idle server connections to retain for this pool.
 
 ### statement_timeout
 ```
@@ -474,6 +535,16 @@ default: 0
 
 Maximum query duration. Dangerous, but protects against DBs that died in a non-obvious way.
 0 means it is disabled.
+
+### connect_timeout
+```
+path: pools.<pool_name>.users.<user_index>.connect_timeout
+default: <UNSET> # milliseconds
+```
+
+How long the client waits to obtain a server connection before aborting (ms).
+This is similar to PgBouncer's `query_wait_timeout`.
+If unset, uses the `connect_timeout` defined globally.
 
 ## `pools.<pool_name>.shards.<shard_index>` Section
 
@@ -502,4 +573,3 @@ default: "shard0"
 ```
 
 Database name (e.g. "postgres")
-

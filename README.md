@@ -231,7 +231,7 @@ User.find_by_email("test@example.com")
 ```sql
 -- Grab a bunch of users from shard 1
 SET SHARD TO '1';
-SELECT * FROM users LIMT 10;
+SELECT * FROM users LIMIT 10;
 
 -- Find by id
 SET SHARDING KEY TO '1234';
@@ -267,6 +267,8 @@ psql -h 127.0.0.1 -p 6432 -d pgbouncer -c 'SHOW DATABASES'
 ```
 
 Additionally, Prometheus statistics are available at `/metrics` via HTTP.
+
+We also have a [basic Grafana dashboard](https://github.com/postgresml/pgcat/blob/main/grafana_dashboard.json) based on Prometheus metrics that you can import into Grafana and build on it or use it for monitoring.
 
 ### Live configuration reloading
 
