@@ -1164,15 +1164,11 @@ where
 
             let mut initial_message = Some(message);
 
-            // Only apply idle-in-transaction timeout when running in transaction pool mode.
-            // In session mode, long-lived idle sessions are expected, so we do not time them out here.
-            let idle_client_timeout_duration = if self.transaction_mode {
-                match get_idle_client_in_transaction_timeout() {
-                    0 => tokio::time::Duration::MAX,
-                    timeout => tokio::time::Duration::from_millis(timeout),
-                }
-            } else {
-                tokio::time::Duration::MAX
+            // Use the configured idle_client_in_transaction_timeout for both pool modes.
+            // Whether it results in an error depends on whether a transaction is actually open.
+            let idle_client_timeout_duration = match get_idle_client_in_transaction_timeout() {
+                0 => tokio::time::Duration::MAX,
+                timeout => tokio::time::Duration::from_millis(timeout),
             };
 
             // Transaction loop. Multiple queries can be issued by the client here.
@@ -1227,23 +1223,30 @@ where
                                 return Err(err);
                             }
                             Err(_) => {
-                                // Client idle in transaction timeout
-                                error_response(&mut self.write, "idle transaction timeout").await?;
-                                error!(
-                                    "Client idle in transaction timeout: \
-                                    {{ \
-                                        pool_name: {}, \
-                                        username: {}, \
-                                        shard: {:?}, \
-                                        role: \"{:?}\" \
-                                    }}",
-                                    self.pool_name,
-                                    self.username,
-                                    query_router.shard(),
-                                    query_router.role()
-                                );
+                                // Timeout while waiting for the next client message.
+                                // Only treat this as an idle *transaction* timeout if we're actually in a transaction.
+                                if server.in_transaction() {
+                                    error_response(&mut self.write, "idle transaction timeout").await?;
+                                    error!(
+                                        "Client idle in transaction timeout: \
+                                        {{ \
+                                            pool_name: {}, \
+                                            username: {}, \
+                                            shard: {:?}, \
+                                            role: \"{:?}\" \
+                                        }}",
+                                        self.pool_name,
+                                        self.username,
+                                        query_router.shard(),
+                                        query_router.role()
+                                    );
 
-                                break;
+                                    break;
+                                } else {
+                                    // Not in a transaction (e.g. session mode idle, or between transactions).
+                                    // Just continue waiting for the next client message.
+                                    continue;
+                                }
                             }
                         }
                     }
