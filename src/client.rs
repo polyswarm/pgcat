@@ -1164,9 +1164,15 @@ where
 
             let mut initial_message = Some(message);
 
-            let idle_client_timeout_duration = match get_idle_client_in_transaction_timeout() {
-                0 => tokio::time::Duration::MAX,
-                timeout => tokio::time::Duration::from_millis(timeout),
+            // Only apply idle-in-transaction timeout when running in transaction pool mode.
+            // In session mode, long-lived idle sessions are expected, so we do not time them out here.
+            let idle_client_timeout_duration = if self.transaction_mode {
+                match get_idle_client_in_transaction_timeout() {
+                    0 => tokio::time::Duration::MAX,
+                    timeout => tokio::time::Duration::from_millis(timeout),
+                }
+            } else {
+                tokio::time::Duration::MAX
             };
 
             // Transaction loop. Multiple queries can be issued by the client here.
@@ -1526,7 +1532,7 @@ where
                         // Add the sync message
                         self.buffer.put(&message[..]);
 
-                        let mut should_send_to_server = true;
+                        let should_send_to_server = true;
                         // Always send Sync to the server to properly terminate any extended-protocol cycle.
                         // Avoid fabricating ReadyForQuery without server acknowledgement.
 
