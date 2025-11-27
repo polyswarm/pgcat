@@ -1086,10 +1086,10 @@ impl Server {
 
                 // CopyOutResponse: copy is starting from the server to the client.
                 'H' => {
+                    // CopyOutResponse: copy is starting from the server to the client.
                     self.in_copy_mode = true;
-                    self.data_available = true;
-                    // If we're in async mode, flush now.
                     if !self.is_async {
+                        // In non-async mode, indicate more data is expected so caller continues reading.
                         self.data_available = true;
                     }
                     break;
@@ -1122,13 +1122,10 @@ impl Server {
             }
         }
 
-        let bytes = self.buffer.clone();
+        let bytes = mem::take(&mut self.buffer);
 
         // Keep track of how much data we got from the server for stats.
         self.stats().data_received(bytes.len());
-
-        // Clear the buffer for next query.
-        self.buffer.clear();
 
         // Successfully received data from server
         self.last_activity = SystemTime::now();
