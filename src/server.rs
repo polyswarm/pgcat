@@ -1064,6 +1064,22 @@ impl Server {
                     self.server_parameters.set_param(key, value, false);
                 }
 
+                // RowDescription
+                'T' => {
+                    // More messages (DataRow/CommandComplete/ReadyForQuery) will follow in non-async mode.
+                    if !self.is_async {
+                        self.data_available = true;
+                    }
+                }
+
+                // ParameterDescription
+                't' => {
+                    // More messages will follow in non-async cycles.
+                    if !self.is_async {
+                        self.data_available = true;
+                    }
+                }
+
                 // DataRow
                 'D' => {
                     // More data is available after this message, this is not the end of the reply.
@@ -1110,6 +1126,26 @@ impl Server {
                 // Parse complete successfully
                 '1' => {
                     self.registering_prepared_statement.pop_front();
+                    // Expect ReadyForQuery next (non-async)
+                    if !self.is_async {
+                        self.data_available = true;
+                    }
+                }
+
+                // BindComplete
+                '2' => {
+                    // Expect more messages (e.g., CommandComplete/ReadyForQuery) in non-async mode
+                    if !self.is_async {
+                        self.data_available = true;
+                    }
+                }
+
+                // CloseComplete
+                '3' => {
+                    // Expect ReadyForQuery next (non-async)
+                    if !self.is_async {
+                        self.data_available = true;
+                    }
                 }
 
                 // Anything else, e.g. errors, notices, etc.
@@ -1118,6 +1154,9 @@ impl Server {
             };
 
             if self.is_async {
+                // In async mode, keep signaling that more data may be available until ReadyForQuery is received.
+                // The 'Z' branch above sets data_available = false and breaks, so we won't get here for 'Z'.
+                self.data_available = true;
                 break;
             }
         }

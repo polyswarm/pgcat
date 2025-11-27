@@ -1527,14 +1527,8 @@ where
                         self.buffer.put(&message[..]);
 
                         let mut should_send_to_server = true;
-
-                        // If we have just a sync message left (maybe after omitting sending some messages to the server) no need to send it to the server
-                        if matches!(self.buffer.first(), Some(b'S')) {
-                            should_send_to_server = false;
-                            // queue up a ready for query message to send to the client, respecting the transaction state of the server
-                            self.response_message_queue_buffer
-                                .put(ready_for_query(server.in_transaction()));
-                        }
+                        // Always send Sync to the server to properly terminate any extended-protocol cycle.
+                        // Avoid fabricating ReadyForQuery without server acknowledgement.
 
                         // Send all queued messages to the client
                         // NOTE: it's possible we don't perfectly send things back in the same order as postgres would,
@@ -1568,7 +1562,9 @@ where
 
                         self.buffer.clear();
 
-                        if !server.in_transaction() {
+                        // Only Sync (S) marks the end of an extended-protocol cycle.
+                        // Flush (H) just flushes currently available results.
+                        if code == 'S' && !server.in_transaction() {
                             self.stats.transaction();
                             server
                                 .stats()
@@ -2025,9 +2021,11 @@ where
             .await?;
 
         let query_start = Instant::now();
-        // Read all data the server has to offer, which can be multiple messages
-        // buffered in 8196 bytes chunks.
-        loop {
+
+        if code == 'H' {
+            // Flush (H) should not eagerly drain the entire extended-protocol cycle.
+            // We read a single server response chunk here; further messages will be
+            // delivered via the async recv branch in the main loop.
             let response = self
                 .receive_server_message(server, address, pool, client_stats)
                 .await?;
@@ -2035,14 +2033,30 @@ where
             match write_all_flush(&mut self.write, &response).await {
                 Ok(_) => (),
                 Err(err) => {
-                    // We might be in some kind of error/in between protocol state, better to just kill this server
                     server.mark_bad(err.to_string().as_str());
                     return Err(err);
                 }
             };
+        } else {
+            // For Sync (S) and all other commands, drain until the server
+            // indicates there is no more data available (i.e. until ReadyForQuery).
+            loop {
+                let response = self
+                    .receive_server_message(server, address, pool, client_stats)
+                    .await?;
 
-            if !server.is_data_available() {
-                break;
+                match write_all_flush(&mut self.write, &response).await {
+                    Ok(_) => (),
+                    Err(err) => {
+                        // We might be in some kind of error/in between protocol state, better to just kill this server
+                        server.mark_bad(err.to_string().as_str());
+                        return Err(err);
+                    }
+                };
+
+                if !server.is_data_available() {
+                    break;
+                }
             }
         }
 
