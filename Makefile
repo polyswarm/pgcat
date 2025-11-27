@@ -1,7 +1,7 @@
 BASE_IMAGE_NAME:=pgcat
 
 build:
-	docker build \
+	docker buildx build --output plain \
 		-t $(REPO_URL)/$(BASE_IMAGE_NAME) \
 		.
 
