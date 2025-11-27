@@ -274,6 +274,7 @@ pub struct Server {
 
     /// Our server response buffer. We buffer data before we give it to the client.
     buffer: BytesMut,
+    is_async: bool,
 
     /// Server information the server sent us over on startup.
     server_parameters: ServerParameters,
@@ -801,6 +802,7 @@ impl Server {
                         stream: BufStream::new(stream),
                         buffer: BytesMut::with_capacity(8196),
                         server_parameters,
+                        is_async: false,
                         process_id,
                         secret_key,
                         in_transaction: false,
@@ -896,6 +898,16 @@ impl Server {
                 self.bad = true;
                 Err(err)
             }
+        }
+    }
+
+    /// Switch to async mode, flushing messages as soon
+    /// as we receive them without buffering or waiting for "ReadyForQuery".
+    pub fn switch_async(&mut self, on: bool) {
+        if on {
+            self.is_async = true;
+        } else {
+            self.is_async = false;
         }
     }
 
@@ -1052,10 +1064,29 @@ impl Server {
                     self.server_parameters.set_param(key, value, false);
                 }
 
+                // RowDescription
+                'T' => {
+                    // More messages (DataRow/CommandComplete/ReadyForQuery) will follow in non-async mode.
+                    if !self.is_async {
+                        self.data_available = true;
+                    }
+                }
+
+                // ParameterDescription
+                't' => {
+                    // More messages will follow in non-async cycles.
+                    if !self.is_async {
+                        self.data_available = true;
+                    }
+                }
+
                 // DataRow
                 'D' => {
                     // More data is available after this message, this is not the end of the reply.
-                    self.data_available = true;
+                    // If we're async, flush to client now.
+                    if !self.is_async {
+                        self.data_available = true;
+                    }
 
                     // Don't flush yet, the more we buffer, the faster this goes...up to a limit.
                     if self.buffer.len() >= 8196 {
@@ -1071,8 +1102,12 @@ impl Server {
 
                 // CopyOutResponse: copy is starting from the server to the client.
                 'H' => {
+                    // CopyOutResponse: copy is starting from the server to the client.
                     self.in_copy_mode = true;
-                    self.data_available = true;
+                    if !self.is_async {
+                        // In non-async mode, indicate more data is expected so caller continues reading.
+                        self.data_available = true;
+                    }
                     break;
                 }
 
@@ -1091,21 +1126,45 @@ impl Server {
                 // Parse complete successfully
                 '1' => {
                     self.registering_prepared_statement.pop_front();
+                    // Expect ReadyForQuery next (non-async)
+                    if !self.is_async {
+                        self.data_available = true;
+                    }
+                }
+
+                // BindComplete
+                '2' => {
+                    // Expect more messages (e.g., CommandComplete/ReadyForQuery) in non-async mode
+                    if !self.is_async {
+                        self.data_available = true;
+                    }
+                }
+
+                // CloseComplete
+                '3' => {
+                    // Expect ReadyForQuery next (non-async)
+                    if !self.is_async {
+                        self.data_available = true;
+                    }
                 }
 
                 // Anything else, e.g. errors, notices, etc.
                 // Keep buffering until ReadyForQuery shows up.
                 _ => (),
             };
+
+            if self.is_async {
+                // In async mode, keep signaling that more data may be available until ReadyForQuery is received.
+                // The 'Z' branch above sets data_available = false and breaks, so we won't get here for 'Z'.
+                self.data_available = true;
+                break;
+            }
         }
 
-        let bytes = self.buffer.clone();
+        let bytes = mem::take(&mut self.buffer);
 
         // Keep track of how much data we got from the server for stats.
         self.stats().data_received(bytes.len());
-
-        // Clear the buffer for next query.
-        self.buffer.clear();
 
         // Successfully received data from server
         self.last_activity = SystemTime::now();
@@ -1319,6 +1378,28 @@ impl Server {
         Ok(())
     }
 
+    /// Ensure the server is ready for simple-query messages by ending any in-flight
+    /// extended-protocol pipeline (triggered when the client requested async/flush).
+    async fn ensure_ready_for_simple_query(&mut self) -> Result<(), Error> {
+        if self.is_async {
+            // Send a Sync to terminate any extended-protocol pipeline and drain until ReadyForQuery
+            let mut bytes = BytesMut::new();
+            bytes.extend_from_slice(&sync());
+            self.send(&bytes).await?;
+
+            loop {
+                self.recv(None).await?;
+                if !self.is_data_available() {
+                    break;
+                }
+            }
+
+            // Back to normal (non-async) mode
+            self.switch_async(false);
+        }
+        Ok(())
+    }
+
     /// Perform any necessary cleanup before putting the server
     /// connection back in the pool
     pub async fn checkin_cleanup(&mut self) -> Result<(), Error> {
@@ -1336,13 +1417,18 @@ impl Server {
         // to avoid leaking state between clients. For performance reasons we only
         // send `RESET ALL` if we think the session is altered instead of just sending
         // it before each checkin.
-        debug!(target: "pgcat::server::cleanup", "Discarding state ({}) for application {}", self.cleanup_state, self.application_name);
-        let mut reset_string = String::from("DISCARD ALL;");
-        // Since we deallocated all prepared statements, we need to clear the cache
-        if let Some(cache) = &mut self.prepared_statement_cache {
-            cache.clear();
-        };
-        self.query(&reset_string).await?;
+        if self.cleanup_connections || self.cleanup_state.needs_cleanup() {
+            // If the last client interaction used async/flush (pipeline-like), exit it first so
+            // that DISCARD ALL is allowed by the server.
+            self.ensure_ready_for_simple_query().await?;
+
+            debug!(target: "pgcat::server::cleanup", "Discarding state ({}) for application {}", self.cleanup_state, self.application_name);
+            // Since we deallocated all prepared statements, we need to clear the cache
+            if let Some(cache) = &mut self.prepared_statement_cache {
+                cache.clear();
+            };
+            self.query("DISCARD ALL;").await?;
+        }
         self.cleanup_state.reset();
 
         if self.in_copy_mode() {
