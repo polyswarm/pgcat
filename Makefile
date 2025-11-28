@@ -1,9 +1,9 @@
-BASE_IMAGE_NAME:=pgcat
+BASE_IMAGE_NAME := pgcat
+REPO_URL ?=
+IMAGE_TAG := $(if $(REPO_URL),$(REPO_URL)/$(BASE_IMAGE_NAME),$(BASE_IMAGE_NAME))
 
 build:
-	docker buildx build --progress plain \
-		-t $(REPO_URL)/$(BASE_IMAGE_NAME) \
-		.
+	docker buildx build --progress plain -t $(IMAGE_TAG) .
 
 release:
-	docker push $(REPO_URL)/$(BASE_IMAGE_NAME)
+	docker push $(IMAGE_TAG)

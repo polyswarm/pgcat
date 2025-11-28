@@ -989,12 +989,11 @@ impl ConnectionPool {
         let read_guard = self.banlist.read();
         let exceeded_ban_time = match read_guard[address.shard].get(address) {
             Some((ban_reason, timestamp)) => {
-                let now = chrono::offset::Utc::now().naive_utc();
+                let now_secs = chrono::offset::Utc::now().timestamp();
+                let ts_secs = timestamp.and_utc().timestamp();
                 match ban_reason {
-                    BanReason::AdminBan(duration) => {
-                        now.timestamp() - timestamp.timestamp() > *duration
-                    }
-                    _ => now.timestamp() - timestamp.timestamp() > self.settings.ban_time,
+                    BanReason::AdminBan(duration) => now_secs - ts_secs > *duration,
+                    _ => now_secs - ts_secs > self.settings.ban_time,
                 }
             }
             None => return true,
@@ -1076,7 +1075,7 @@ impl ConnectionPool {
 
     /// Get the number of checked out connection for an address
     /// Get server settings retrieved at connection setup.
-
+    ///
     /// Calculate how many used connections in the pool
     /// for the given server.
     fn busy_connection_count(&self, address: &Address) -> u32 {

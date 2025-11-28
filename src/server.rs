@@ -40,7 +40,7 @@ pub enum StreamInner {
     },
     Tls {
         #[pin]
-        stream: TlsStream<TcpStream>,
+        stream: Box<TlsStream<TcpStream>>,
     },
 }
 
@@ -401,12 +401,12 @@ impl Server {
                     debug!("Connecting to server using TLS");
 
                     let mut root_store = RootCertStore::empty();
-                    root_store.add_server_trust_anchors(
-                        webpki_roots::TLS_SERVER_ROOTS.0.iter().map(|ta| {
+                    root_store.add_trust_anchors(
+                        webpki_roots::TLS_SERVER_ROOTS.iter().map(|ta| {
                             OwnedTrustAnchor::from_subject_spki_name_constraints(
-                                ta.subject,
-                                ta.spki,
-                                ta.name_constraints,
+                                ta.subject.to_vec(),
+                                ta.subject_public_key_info.to_vec(),
+                                ta.name_constraints.as_ref().map(|nc| nc.to_vec()),
                             )
                         }),
                     );
@@ -436,7 +436,7 @@ impl Server {
                         }
                     };
 
-                    StreamInner::Tls { stream }
+                    StreamInner::Tls { stream: Box::new(stream) }
                 }
 
                 // Server does not support TLS
@@ -904,11 +904,7 @@ impl Server {
     /// Switch to async mode, flushing messages as soon
     /// as we receive them without buffering or waiting for "ReadyForQuery".
     pub fn switch_async(&mut self, on: bool) {
-        if on {
-            self.is_async = true;
-        } else {
-            self.is_async = false;
-        }
+        self.is_async = on;
     }
 
     /// Receive data from the server in response to a client request.
@@ -1506,13 +1502,21 @@ async fn parse_query_message(message: &mut BytesMut) -> Result<Vec<String>, Erro
     match message::backend::Message::parse(message) {
         Ok(Some(message::backend::Message::RowDescription(_description))) => {}
         Ok(Some(message::backend::Message::ErrorResponse(err))) => {
+            let field_values = err
+                .fields()
+                .iterator()
+                .filter_map(|element| match element {
+                    Ok(field) => std::str::from_utf8(field.value_bytes())
+                        .ok()
+                        .map(|s| s.to_owned()),
+                    Err(_) => None,
+                })
+                .collect::<Vec<String>>()
+                .join("");
             return Err(Error::ProtocolSyncError(format!(
                 "Protocol error parsing response. Err: {:?}",
-                err.fields()
-                    .iterator()
-                    .fold(String::default(), |acc, element| acc
-                        + element.unwrap().value())
-            )))
+                field_values
+            )));
         }
         Ok(_) => {
             return Err(Error::ProtocolSyncError(
