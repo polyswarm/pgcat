@@ -529,13 +529,14 @@ where
         .expect("Time went backwards")
         .as_secs() as i64;
 
-    for (id, pool) in get_all_pools().iter() {
+        for (id, pool) in get_all_pools().iter() {
         for (address, (ban_reason, ban_time)) in pool.get_bans().iter() {
             let ban_duration = match ban_reason {
                 BanReason::AdminBan(duration) => *duration,
                 _ => pool.settings.ban_time,
             };
-            let remaining = ban_duration - (now - ban_time.timestamp());
+            let ban_time_secs = ban_time.and_utc().timestamp();
+            let remaining = ban_duration - (now - ban_time_secs);
             if remaining <= 0 {
                 continue;
             }
