@@ -2029,12 +2029,19 @@ where
         self.send_server_message(server, message, address, pool)
             .await?;
 
+        // For Flush (H), do not wait for any server response here. Flush only
+        // guarantees that already-pending data will be sent; the server is not
+        // required to send anything new. Blocking waiting for a response can
+        // deadlock the client if there is nothing to receive.
+        if code == 'H' {
+            return Ok(());
+        }
+
         let query_start = Instant::now();
 
-        if code == 'H' {
-            // Flush (H) should not eagerly drain the entire extended-protocol cycle.
-            // We read a single server response chunk here; further messages will be
-            // delivered via the async recv branch in the main loop.
+        // For Sync (S) and all other commands, drain until the server
+        // indicates there is no more data available (i.e. until ReadyForQuery).
+        loop {
             let response = self
                 .receive_server_message(server, address, pool, client_stats)
                 .await?;
@@ -2042,30 +2049,14 @@ where
             match write_all_flush(&mut self.write, &response).await {
                 Ok(_) => (),
                 Err(err) => {
+                    // We might be in some kind of error/in between protocol state, better to just kill this server
                     server.mark_bad(err.to_string().as_str());
                     return Err(err);
                 }
             };
-        } else {
-            // For Sync (S) and all other commands, drain until the server
-            // indicates there is no more data available (i.e. until ReadyForQuery).
-            loop {
-                let response = self
-                    .receive_server_message(server, address, pool, client_stats)
-                    .await?;
 
-                match write_all_flush(&mut self.write, &response).await {
-                    Ok(_) => (),
-                    Err(err) => {
-                        // We might be in some kind of error/in between protocol state, better to just kill this server
-                        server.mark_bad(err.to_string().as_str());
-                        return Err(err);
-                    }
-                };
-
-                if !server.is_data_available() {
-                    break;
-                }
+            if !server.is_data_available() {
+                break;
             }
         }
 
