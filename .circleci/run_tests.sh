@@ -126,6 +126,9 @@ start_pgcat "info"
 cd tests/rust
 cargo run
 cd ../../
+python3 tests/python/async_test.py
+
+start_pgcat "info"
 
 # Admin tests
 export PGPASSWORD=admin_pass
